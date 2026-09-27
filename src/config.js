@@ -30,6 +30,14 @@ export const DEFAULT_CONFIG = {
       'anthropic-version',
       'anthropic-beta',
     ],
+    /**
+     * 对流式 chat.completions 自动注入 stream_options.include_usage = true，
+     * 以便上游在最后一个 chunk 回报 token 用量（否则日志里用量为空）。
+     * 客户端可用请求头 `x-logger-include-usage: false` 单次关闭。
+     */
+    includeUsageInStream: true,
+    /** 是否给 /v1 代理响应加上宽松 CORS 头；默认关闭，避免任意网页盗用本地代理 */
+    cors: false,
   },
   logging: {
     /** 是否记录请求体 / 响应体 */
