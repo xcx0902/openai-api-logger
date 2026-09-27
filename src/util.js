@@ -77,9 +77,14 @@ export function isPlainObject(v) {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
-function clone(v) {
+/** 深拷贝（注意不能复用 deepMerge，否则会无限递归） */
+export function clone(v) {
   if (Array.isArray(v)) return v.map(clone);
-  if (isPlainObject(v)) return deepMerge({}, v);
+  if (isPlainObject(v)) {
+    const out = {};
+    for (const [k, val] of Object.entries(v)) out[k] = clone(val);
+    return out;
+  }
   return v;
 }
 
