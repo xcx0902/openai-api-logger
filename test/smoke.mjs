@@ -220,6 +220,7 @@ async function main() {
     assert.equal(log.upstream_name, 'mock');
     assert.equal(log.route_reason, 'api-key-match', `路由应命中 api key 匹配，实际 ${log.route_reason}`);
     assert.equal(log.request_body.messages[1].content, 'ping test 123');
+    assert.equal(log.path, '/v1/chat/completions', '详情应带上请求路径（控制台详情抽屉要显示它）');
     assert.equal(log.response_body.object, 'chat.completion');
     assert.ok(log.response_text.includes('mock 上游生成'));
     assert.equal(log.prompt_tokens, result.json.usage.prompt_tokens);
@@ -236,6 +237,25 @@ async function main() {
     const auth = detail.json.request_headers.authorization;
     assert.ok(!auth.includes(MOCK_KEY), `Authorization 未脱敏：${auth}`);
     assert.ok(auth.includes('…'), `Authorization 应为掩码格式：${auth}`);
+  });
+
+  await step('按 request_id 反查日志（控制台对话页靠它关联详情）', async () => {
+    const sent = await proxy('/v1/chat/completions', {
+      body: { model: 'mock-gpt-4o', messages: [{ role: 'user', content: 'request-id 反查专用文案' }] },
+    });
+    const requestId = sent.headers.get('x-logger-request-id');
+    assert.ok(requestId, '成功响应应带 x-logger-request-id');
+
+    const found = await api(`/admin/api/logs/by-request-id/${encodeURIComponent(requestId)}`);
+    assert.equal(found.status, 200);
+    assert.equal(found.json.request_id, requestId);
+
+    const detail = await api(`/admin/api/logs/${found.json.id}`);
+    assert.equal(detail.json.request_id, requestId, '反查到的 id 应指向同一条日志');
+    assert.ok(detail.json.request_preview.includes('request-id 反查专用文案'), '反查应命中正确的请求');
+
+    const missing = await api('/admin/api/logs/by-request-id/does-not-exist');
+    assert.equal(missing.status, 404);
   });
 
   await step('流式：SSE 原样透传且被完整重组', async () => {
@@ -408,6 +428,7 @@ async function main() {
       body: { model: 'mock-gpt-4o', messages: [{ role: 'user', content: 'unreachable' }] },
     });
     assert.equal(result.status, 502);
+    assert.ok(result.headers.get('x-logger-request-id'), '失败响应同样应带 x-logger-request-id');
     const log = await latestLog();
     assert.equal(log.ok, false);
     assert.equal(log.status_code, 502);
@@ -437,6 +458,7 @@ async function main() {
     const result = await proxy('/v1/chat/completions', { body: { model: 'mock-gpt-4o', messages: [{ role: 'user', content: 'no upstream' }] } });
     assert.equal(result.status, 503);
     assert.equal(result.json.error.code, 'no_upstream');
+    assert.ok(result.headers.get('x-logger-request-id'), '失败响应同样应带 x-logger-request-id');
     const log = await latestLog();
     assert.equal(log.ok, false);
     assert.equal(log.status_code, 503);

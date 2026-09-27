@@ -6,7 +6,7 @@
      1. 模板与格式化工具（自带 HTML 转义的 t`` 模板）
      2. 状态与请求封装
      3. 通用交互组件（toast / 弹窗 / 抽屉）
-     4. 四个视图：概览、日志、上游、设置
+     4. 五个视图：概览、对话、日志、上游、设置
      5. 路由与启动
    ========================================================================== */
 
@@ -193,6 +193,7 @@ const state = {
     result: { total: 0, rows: [] },
   },
   settings: null,
+  chat: null,
   liveSource: null,
   liveBuffer: [],
   needsToken: false,
@@ -277,11 +278,14 @@ function openDrawer(content) {
   $('#drawer-mask').hidden = false;
 }
 
-function closeDrawer() {
-  $('#drawer').hidden = true;
+/** 关闭抽屉；syncHash=true 时把 #/logs/<id> 退回 #/logs（切换路由时用不到） */
+function closeDrawer({ syncHash = true } = {}) {
+  const drawer = $('#drawer');
+  if (!drawer) return;
+  drawer.hidden = true;
   $('#drawer-mask').hidden = true;
-  $('#drawer').innerHTML = '';
-  if (location.hash.startsWith('#/logs/')) location.hash = '#/logs';
+  drawer.innerHTML = '';
+  if (syncHash && location.hash.startsWith('#/logs/')) location.hash = '#/logs';
 }
 
 async function copyText(text, label = '已复制') {
@@ -912,6 +916,394 @@ function openUpstreamModal(upstream = null) {
   });
 }
 
+/* ---- 对话 ---- */
+
+/**
+ * 内置简易对话页。
+ *
+ * 它不直接连上游，而是把请求发到**同源的本机代理** /v1/chat/completions——
+ * 因此这一页产生的每一次请求，和外部客户端发来的完全等价，都会落进日志，
+ * 便于「在控制台里随手试一下，再立刻去日志页看这次请求的完整记录」。
+ *
+ * 上游选择走 X-Upstream 请求头，复用代理已有的路由规则，不在前端另起一套。
+ */
+function chatState() {
+  if (state.chat) return state.chat;
+  const stored = (key, fallback) => {
+    const value = localStorage.getItem(key);
+    return value === null ? fallback : value;
+  };
+  let messages = [];
+  try {
+    const parsed = JSON.parse(localStorage.getItem('oal.chat.history') || '[]');
+    if (Array.isArray(parsed)) messages = parsed;
+  } catch {
+    messages = [];
+  }
+  state.chat = {
+    model: stored('oal.chat.model', ''),
+    system: stored('oal.chat.system', ''),
+    upstream: stored('oal.chat.upstream', ''),
+    proxyToken: stored('oal.chat.proxyToken', ''),
+    stream: stored('oal.chat.stream', '1') !== '0',
+    setupOpen: stored('oal.chat.setupOpen', '1') !== '0',
+    messages,
+    sending: false,
+    controller: null,
+  };
+  return state.chat;
+}
+
+/** 把表单里的值读进状态：发送前也要调一次，避免「填完没失焦就点发送」读到旧值 */
+function chatReadForm() {
+  const c = chatState();
+  const value = (sel, apply) => {
+    const el = $(sel);
+    if (el) apply(el.value);
+  };
+  value('#chat-model', (v) => (c.model = v));
+  value('#chat-system', (v) => (c.system = v));
+  value('#chat-upstream', (v) => (c.upstream = v));
+  value('#chat-token', (v) => (c.proxyToken = v));
+  const stream = $('#chat-stream');
+  if (stream) c.stream = stream.checked;
+}
+
+function chatPersist() {
+  const c = chatState();
+  localStorage.setItem('oal.chat.model', c.model);
+  localStorage.setItem('oal.chat.system', c.system);
+  localStorage.setItem('oal.chat.upstream', c.upstream);
+  localStorage.setItem('oal.chat.proxyToken', c.proxyToken);
+  localStorage.setItem('oal.chat.stream', c.stream ? '1' : '0');
+  localStorage.setItem('oal.chat.setupOpen', c.setupOpen ? '1' : '0');
+  try {
+    // 只留最近 30 条，避免对话长了把 localStorage 撑满
+    localStorage.setItem('oal.chat.history', JSON.stringify(c.messages.slice(-30)));
+  } catch {
+    /* 存不下不影响继续对话 */
+  }
+}
+
+/** 模型候选：日志里出现过的 + 各上游配置的模型白名单 */
+function chatModelOptions() {
+  const set = new Set();
+  for (const m of state.facets.models || []) if (m.model) set.add(m.model);
+  for (const u of state.upstreams || []) for (const m of u.models || []) set.add(m);
+  return [...set].slice(0, 80);
+}
+
+function renderChat() {
+  chatState();
+  const c = state.chat;
+  const hasUpstream = (state.upstreams || []).some((u) => u.enabled);
+  $('#view').innerHTML = t`
+    <div class="card">
+      <div class="card-head">
+        <h2>请求参数</h2>
+        <span class="badge ghost">经本机代理转发 · 全部落库</span>
+        <span class="spacer"></span>
+        <button class="btn sm" data-action="chat-toggle-setup">${c.setupOpen ? '收起' : '展开'}</button>
+      </div>
+      <div class="card-body" id="chat-setup" ${c.setupOpen ? '' : 'hidden'}>
+        ${hasUpstream
+          ? ''
+          : t`<div class="banner warn">还没有启用中的上游，先把请求发出去会得到 503。请到
+              <a href="#/upstreams">上游</a>添加一个（也可以先跑 <code class="code-inline">npm run mock</code>
+              起一个本地 mock 上游试试）。</div>`}
+        <div class="form-grid">
+          <label class="field"><span>模型名</span>
+            <input type="text" id="chat-model" list="chat-model-list" value="${c.model}" placeholder="如 gpt-4o-mini" autocomplete="off" />
+            <datalist id="chat-model-list">${chatModelOptions().map((m) => t`<option value="${m}"></option>`)}</datalist>
+          </label>
+          <label class="field"><span>上游 <span class="tip">留空则按代理的默认路由规则自动选择</span></span>
+            <select id="chat-upstream">
+              <option value="">自动匹配</option>
+              ${(state.upstreams || []).map(
+                (u) => t`<option value="${u.name}" ${c.upstream === u.name ? 'selected' : ''}>${u.name}${u.is_default ? '（默认）' : ''}${u.enabled ? '' : ' · 已停用'}</option>`,
+              )}
+            </select>
+          </label>
+          <label class="field full"><span>系统提示词 <span class="tip">system 角色，留空则不加这条消息</span></span>
+            <textarea id="chat-system" rows="3" placeholder="你是一个乐于助人的助手…">${c.system}</textarea>
+          </label>
+          <label class="field"><span>代理令牌 <span class="tip">仅当「设置 → 代理令牌」配置了才需要填</span></span>
+            <input type="password" id="chat-token" value="${c.proxyToken}" placeholder="留空即可" autocomplete="off" />
+          </label>
+        </div>
+        <label class="check"><input type="checkbox" id="chat-stream" ${c.stream ? 'checked' : ''} /><span>流式输出<span class="tip">对应 stream: true，日志里会有逐条 SSE 事件时间线</span></span></label>
+      </div>
+    </div>
+
+    <div class="card chat-card">
+      <div class="card-head"><h2>对话</h2><span class="spacer"></span>
+        <span class="note">这一页的每次发送都会作为 chat.completions 请求落进日志</span>
+      </div>
+      <div class="chat-log" id="chat-log"></div>
+      <div class="chat-composer">
+        <textarea id="chat-input" rows="2" placeholder="输入消息…"></textarea>
+        <div class="chat-composer-bar">
+          <span class="note">Enter 换行，⌘/Ctrl + Enter 发送</span>
+          <span class="spacer"></span>
+          <button class="btn sm" data-action="chat-reset">清空对话</button>
+          <button class="btn sm" data-action="chat-stop">停止</button>
+          <button class="btn primary sm" data-action="chat-send">发送</button>
+        </div>
+      </div>
+    </div>`;
+  renderChatLog();
+  renderChatButtons();
+  on($('#chat-input'), 'keydown', (event) => {
+    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+      event.preventDefault();
+      sendChat();
+    }
+  });
+}
+
+function renderChatButtons() {
+  const sending = chatState().sending;
+  const send = $('[data-action="chat-send"]');
+  const stop = $('[data-action="chat-stop"]');
+  if (send) send.disabled = sending;
+  if (stop) stop.disabled = !sending;
+}
+
+function renderChatLog() {
+  const box = $('#chat-log');
+  if (!box) return;
+  const c = chatState();
+  if (!c.messages.length) {
+    box.innerHTML = t`<div class="empty">
+      <strong>还没有消息</strong>填写模型名与上游后，在下面输入内容开始对话。
+      这里发出的请求与外部客户端完全等价，因此同样可以在「日志」页看到请求体、响应体、用量与流式事件。
+    </div>`;
+    return;
+  }
+  const liveIndex = c.sending ? c.messages.length - 1 : -1;
+  box.innerHTML = t`<div class="chat-list">${c.messages.map((m, index) => chatBubble(m, index, liveIndex))}</div>`;
+  box.scrollTop = box.scrollHeight;
+}
+
+function chatBubble(message, index, liveIndex) {
+  const live = index === liveIndex;
+  if (message.role === 'user') {
+    return t`<div class="chat-msg user">
+      <div class="chat-role">你</div>
+      <div class="chat-text">${message.content}</div>
+    </div>`;
+  }
+  const meta = message.meta || {};
+  const text = message.content || (live ? '正在等待上游…' : message.error ? '' : '（上游没有返回内容）');
+  return t`<div class="chat-msg assistant ${message.error ? 'failed' : ''}">
+    <div class="chat-role">
+      <span>助手</span>
+      ${meta.model ? t`<span class="badge ghost">${meta.model}</span>` : ''}
+      ${meta.upstream ? t`<span class="badge ghost">${meta.upstream}</span>` : ''}
+      ${live ? t`<span class="badge ghost">生成中</span>` : ''}
+    </div>
+    ${message.reasoning
+      ? t`<details class="chat-reasoning"><summary>推理内容</summary><div class="chat-text">${message.reasoning}</div></details>`
+      : ''}
+    <div class="chat-text" ${live ? 'id="chat-live-text"' : ''}>${text}</div>
+    ${message.error ? t`<div class="chat-error">⚠ ${message.error}</div>` : ''}
+    ${chatMetaRow(meta, index)}
+  </div>`;
+}
+
+function chatMetaRow(meta, index) {
+  const bits = [];
+  if (meta.durationMs != null) bits.push(t`<span>${fmtDur(meta.durationMs)}</span>`);
+  if (meta.usage?.total != null) {
+    bits.push(t`<span title="输入 ${fmtNum(meta.usage.prompt ?? 0)} / 输出 ${fmtNum(meta.usage.completion ?? 0)}">${fmtTokens(meta.usage.total)} token</span>`);
+  }
+  if (meta.finishReason) bits.push(t`<span>finish: ${meta.finishReason}</span>`);
+  if (meta.status && meta.status >= 400) bits.push(t`<span class="badge err">HTTP ${meta.status}</span>`);
+  if (meta.logId) bits.push(t`<a href="#/logs/${meta.logId}">查看日志 #${meta.logId}</a>`);
+  else if (meta.requestId) bits.push(t`<span class="mono" title="${meta.requestId}">${meta.requestId.slice(0, 8)}…</span>`);
+  if (!meta.logId && !meta.requestId && !meta.durationMs) return '';
+  bits.push(
+    t`<button class="btn ghost sm" data-action="chat-copy" data-index="${index}" title="复制这条回复">复制</button>`,
+  );
+  return t`<div class="chat-meta">${bits}</div>`;
+}
+
+function chatUsageOf(usage) {
+  if (!usage) return null;
+  return {
+    prompt: usage.prompt_tokens ?? null,
+    completion: usage.completion_tokens ?? null,
+    total: usage.total_tokens ?? null,
+  };
+}
+
+async function sendChat() {
+  const c = chatState();
+  if (c.sending) return;
+  chatReadForm();
+  const input = $('#chat-input');
+  const text = (input?.value || '').trim();
+  if (!text) {
+    toast('请输入消息内容', 'err');
+    return;
+  }
+  if (!c.model.trim()) {
+    toast('请先填写模型名', 'err');
+    $('#chat-model')?.focus();
+    return;
+  }
+
+  const assistant = { role: 'assistant', content: '', reasoning: '', meta: {} };
+  c.messages.push({ role: 'user', content: text }, assistant);
+  if (input) input.value = '';
+  c.sending = true;
+  renderChatLog();
+  renderChatButtons();
+
+  // 组装请求体：system + 历史（去掉末尾的助手占位，以及失败/空消息）
+  const messages = [];
+  if (c.system.trim()) messages.push({ role: 'system', content: c.system.trim() });
+  for (const m of c.messages.slice(0, -1)) {
+    if ((m.role === 'user' || m.role === 'assistant') && !m.error && m.content) {
+      messages.push({ role: m.role, content: m.content });
+    }
+  }
+
+  const headers = { 'content-type': 'application/json' };
+  if (c.upstream) headers['x-upstream'] = c.upstream;
+  if (c.proxyToken.trim()) headers.authorization = `Bearer ${c.proxyToken.trim()}`;
+
+  const controller = new AbortController();
+  c.controller = controller;
+  const startedAt = Date.now();
+
+  try {
+    const response = await fetch('/v1/chat/completions', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ model: c.model.trim(), messages, stream: !!c.stream }),
+      signal: controller.signal,
+    });
+    assistant.meta.requestId = response.headers.get('x-logger-request-id') || null;
+    assistant.meta.upstream = response.headers.get('x-logger-upstream') || c.upstream || null;
+
+    if (!response.ok) {
+      const raw = await response.text();
+      let payload = null;
+      try {
+        payload = JSON.parse(raw);
+      } catch {
+        payload = null;
+      }
+      assistant.error = payload?.error?.message || raw.slice(0, 400) || `HTTP ${response.status}`;
+      assistant.meta.status = response.status;
+    } else if (c.stream && /event-stream/i.test(response.headers.get('content-type') || '')) {
+      await consumeChatStream(response, assistant);
+    } else {
+      const json = await response.json();
+      const choice = json?.choices?.[0];
+      assistant.content = choice?.message?.content || '';
+      assistant.reasoning = choice?.message?.reasoning_content || '';
+      assistant.meta.model = json?.model || null;
+      assistant.meta.usage = chatUsageOf(json?.usage);
+      assistant.meta.finishReason = choice?.finish_reason || null;
+    }
+  } catch (err) {
+    assistant.error = err?.name === 'AbortError' ? '已手动停止（客户端断开，日志里会记录为 499）' : `请求失败：${err.message}`;
+  } finally {
+    assistant.meta.durationMs = Date.now() - startedAt;
+    c.sending = false;
+    c.controller = null;
+    chatPersist();
+    renderChatLog();
+    renderChatButtons();
+    resolveChatLogId(assistant);
+  }
+}
+
+/** 读流式响应：SSE 分片 → 累积正文 / 推理 / 用量，并顺带刷新气泡 */
+async function consumeChatStream(response, assistant) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder('utf-8');
+  let buffer = '';
+
+  const handleBlock = (block) => {
+    for (const line of block.split('\n')) {
+      if (!line.startsWith('data:')) continue;
+      const data = line.slice(5).trim();
+      if (!data || data === '[DONE]') continue;
+      let json;
+      try {
+        json = JSON.parse(data);
+      } catch {
+        continue;
+      }
+      const choice = json.choices?.[0];
+      const delta = choice?.delta || {};
+      if (typeof delta.content === 'string') assistant.content += delta.content;
+      else if (Array.isArray(delta.content)) for (const part of delta.content) if (part?.text) assistant.content += part.text;
+      if (delta.reasoning_content) assistant.reasoning = (assistant.reasoning || '') + delta.reasoning_content;
+      if (json.model) assistant.meta.model = json.model;
+      if (choice?.finish_reason) assistant.meta.finishReason = choice.finish_reason;
+      if (json.usage) assistant.meta.usage = chatUsageOf(json.usage);
+      if (json.error) assistant.error = json.error.message || '上游在流中返回了错误';
+    }
+  };
+
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    buffer = buffer.replace(/\r\n/g, '\n');
+    let index;
+    while ((index = buffer.indexOf('\n\n')) >= 0) {
+      handleBlock(buffer.slice(0, index));
+      buffer = buffer.slice(index + 2);
+    }
+    // 只更新正在生成的那条气泡的文本，避免每个分片都重建整段对话
+    const live = $('#chat-live-text');
+    if (live) live.textContent = assistant.content || '正在等待上游…';
+    const box = $('#chat-log');
+    if (box) box.scrollTop = box.scrollHeight;
+  }
+
+  buffer = (buffer + decoder.decode()).replace(/\r\n/g, '\n');
+  if (buffer.trim()) handleBlock(buffer);
+}
+
+/**
+ * 反查这次请求在日志里的 id，用于在气泡下方给出直达详情页的链接。
+ *
+ * 日志行在请求转发前就已写入（phase=running），所以正常情况一次就能查到；
+ * 仍留几次重试，避免极端时序下拿到 404。
+ */
+async function resolveChatLogId(assistant) {
+  const requestId = assistant.meta?.requestId;
+  if (!requestId || assistant.meta.logId) return;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      const found = await api(`/admin/api/logs/by-request-id/${encodeURIComponent(requestId)}`);
+      if (found?.id) {
+        assistant.meta.logId = found.id;
+        chatPersist();
+        if (state.route === 'chat') renderChatLog();
+        return;
+      }
+    } catch {
+      /* 还没写入，稍后重试 */
+    }
+    await new Promise((resolve) => setTimeout(resolve, 300 * (attempt + 1)));
+  }
+}
+
+function resetChat() {
+  const c = chatState();
+  c.messages = [];
+  chatPersist();
+  renderChatLog();
+  toast('对话已清空（日志不受影响）', 'ok');
+}
+
 /* ---- 设置 ---- */
 
 function renderSettings() {
@@ -1029,6 +1421,7 @@ function listValue(id) {
 
 const NAV = [
   ['dashboard', '概览', 'M4 13h6V4H4v9Zm10 7h6v-9h-6v9ZM4 20h6v-4H4v4Zm10-11h6V4h-6v5Z'],
+  ['chat', '对话', 'M20 15a2 2 0 0 1-2 2H8l-4 4V6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v9Z'],
   ['logs', '日志', 'M4 6h16M4 12h16M4 18h10'],
   ['upstreams', '上游', 'M12 3v6m0 6v6M5.5 12h13M4 9.5A2.5 2.5 0 0 1 6.5 7h11A2.5 2.5 0 0 1 20 9.5v5a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 14.5v-5Z'],
   ['settings', '设置', 'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm7.4-3a7.4 7.4 0 0 0-.1-1.2l2-1.5-2-3.4-2.3 1a7.6 7.6 0 0 0-2-1.2L14.6 3h-4l-.4 2.7a7.6 7.6 0 0 0-2 1.2l-2.3-1-2 3.4 2 1.5a7.4 7.4 0 0 0 0 2.4l-2 1.5 2 3.4 2.3-1a7.6 7.6 0 0 0 2 1.2l.4 2.7h4l.4-2.7a7.6 7.6 0 0 0 2-1.2l2.3 1 2-3.4-2-1.5c.06-.4.1-.8.1-1.2Z'],
@@ -1048,6 +1441,7 @@ function renderNav() {
 
 const TITLES = {
   dashboard: ['概览', '请求量、成功率、时延与 token 消耗'],
+  chat: ['对话', '在本机代理上直接对话，请求同样落进日志'],
   logs: ['日志', '每一次代理请求的完整请求与响应记录'],
   upstreams: ['上游', '配置 OpenAI 兼容的上游端点与路由'],
   settings: ['设置', '鉴权、代理行为、日志策略与客户端接入'],
@@ -1058,6 +1452,8 @@ function renderTopbar() {
   const actions = {
     dashboard: t`<select id="dash-days">${[1, 7, 30, 90].map((d) => t`<option value="${d}" ${state.overviewDays === d ? 'selected' : ''}>近 ${d} 天</option>`)}</select>
       <button class="btn sm" data-action="refresh">刷新</button>`,
+    chat: t`<button class="btn sm" data-action="chat-toggle-setup">${chatState().setupOpen ? '收起参数' : '展开参数'}</button>
+      <button class="btn sm" data-action="chat-reset">清空对话</button>`,
     logs: t`<button class="btn sm" data-action="refresh">刷新</button>`,
     upstreams: t`<button class="btn primary sm" data-action="new-upstream">+ 新建上游</button>`,
     settings: t`<button class="btn sm" data-action="refresh">刷新</button>`,
@@ -1099,9 +1495,15 @@ async function router() {
   state.args = args;
   renderNav();
   renderTopbar();
+  // 抽屉挂在路由之外，切到别的页面时要主动收起，否则会一直盖在新页面上
+  // （#/logs/<id> 除外，那正是要打开抽屉的入口）
+  if (state.route !== 'logs' || !args[0]) closeDrawer({ syncHash: false });
 
   if (state.route === 'dashboard') renderDashboard();
-  else if (state.route === 'logs') {
+  else if (state.route === 'chat') {
+    if (!state.facets.models.length) loadFacets();
+    renderChat();
+  } else if (state.route === 'logs') {
     if (!state.facets.models.length) await loadFacets();
     renderLogs();
     if (args[0]) openLogDrawer(args[0]);
@@ -1206,6 +1608,7 @@ document.addEventListener('click', async (event) => {
   if (!target) return;
   const action = target.dataset.action;
   const id = Number(target.dataset.id || 0);
+  const index = Number(target.dataset.index ?? -1);
 
   try {
     switch (action) {
@@ -1215,9 +1618,53 @@ document.addEventListener('click', async (event) => {
           await reloadUpstreamSelect();
           await loadLogs();
         } else if (state.route === 'dashboard') renderDashboard();
-        else if (state.route === 'upstreams') renderUpstreams();
+        else if (state.route === 'chat') {
+          await reloadUpstreamSelect();
+          await loadFacets();
+          renderChat();
+        } else if (state.route === 'upstreams') renderUpstreams();
         else renderSettings();
         break;
+
+      case 'chat-send':
+        await sendChat();
+        break;
+
+      case 'chat-stop':
+        state.chat?.controller?.abort();
+        break;
+
+      case 'chat-reset':
+        if (!chatState().messages.length) {
+          toast('对话是空的');
+          break;
+        }
+        openModal({
+          title: '清空对话',
+          body: t`<div class="banner warn">将清空当前页面上的对话记录（只影响浏览器本地，已写入的日志不会被删除）。</div>`,
+          footer: t`<span class="spacer"></span><button class="btn" data-action="close-modal">取消</button>
+            <button class="btn danger" data-action="chat-reset-confirm">确认清空</button>`,
+        });
+        break;
+
+      case 'chat-reset-confirm':
+        closeModal();
+        resetChat();
+        break;
+
+      case 'chat-toggle-setup': {
+        const c = chatState();
+        c.setupOpen = !c.setupOpen;
+        chatPersist();
+        renderChat();
+        break;
+      }
+
+      case 'chat-copy': {
+        const message = chatState().messages[index];
+        await copyText(message?.content || '', '已复制回复');
+        break;
+      }
 
       case 'goto-logs':
         state.logs.filters.ok = target.dataset.ok || '';
@@ -1520,9 +1967,15 @@ document.addEventListener('change', (event) => {
     state.logs.page = 0;
     loadLogs();
   }
+  // 对话页的参数：改动即记住（发送前还会再读一次，避免没失焦就读到旧值）
+  if (el.id && el.id.startsWith('chat-')) {
+    chatReadForm();
+    chatPersist();
+    renderChatButtons();
+  }
 });
 
-$('#drawer-mask').addEventListener('click', closeDrawer);
+$('#drawer-mask').addEventListener('click', () => closeDrawer());
 // 点击弹窗外侧关闭。只在启动时绑定一次（原先写在 openModal 里，每次打开都会
 // 叠加一个监听器，开着开着就会有 N 个重复回调）。
 $('#modal-mask').addEventListener('click', (event) => {

@@ -39,6 +39,7 @@ export function createAdminHandler({ store, config, bus, version = '0.1.0' }) {
     ['POST', /^\/admin\/api\/logs\/delete$/, handleBulkDeleteLogs],
     ['POST', /^\/admin\/api\/logs\/clear$/, handleClearLogs],
     ['GET', /^\/admin\/api\/logs\/export$/, handleExportLogs],
+    ['GET', /^\/admin\/api\/logs\/by-request-id\/([^/]+)$/, handleGetLogByRequestId],
     ['GET', /^\/admin\/api\/logs\/(\d+)$/, handleGetLog],
     ['DELETE', /^\/admin\/api\/logs\/(\d+)$/, handleDeleteLog],
     ['GET', /^\/admin\/api\/logs\/(\d+)\/events$/, handleGetLogEvents],
@@ -305,6 +306,27 @@ function handleGetLog({ res, store, params }) {
   const log = store.getLog(Number(params[0]));
   if (!log) return sendApiError(res, 404, '日志不存在', 'not_found');
   sendJson(res, 200, log);
+}
+
+/**
+ * 按本地 request_id 反查日志（只回少量字段）。
+ *
+ * 用途：客户端只拿得到响应头里的 x-logger-request-id，拿不到数据库自增 id。
+ * 控制台的「对话」页就是靠它把一条回复关联到对应日志详情。
+ */
+function handleGetLogByRequestId({ res, store, params }) {
+  const log = store.getLogByRequestId(decodeURIComponent(params[0]));
+  if (!log) return sendApiError(res, 404, '未找到该 request_id 对应的日志', 'not_found');
+  sendJson(res, 200, {
+    id: log.id,
+    request_id: log.request_id,
+    endpoint: log.endpoint,
+    ok: log.ok,
+    phase: log.phase,
+    model: log.model,
+    upstream_name: log.upstream_name,
+    started_at: log.started_at,
+  });
 }
 
 function handleGetLogEvents({ res, store, params, url }) {

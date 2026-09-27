@@ -103,6 +103,19 @@ export function createProxyHandler({ store, config, bus }) {
       }
     };
 
+    /**
+     * 把本地请求 ID 写进响应头。
+     *
+     * 成功路径上 filterResponseHeaders 已经带了这两个头；失败路径（鉴权失败、
+     * 没有可用上游、连不上上游……）走的是 sendApiError，这里补上，保证客户端
+     * 无论成功失败都能拿到 x-logger-request-id，据此在日志里反查这次请求。
+     */
+    const markResponse = (upstreamName) => {
+      if (res.headersSent || res.writableEnded) return;
+      res.setHeader('x-logger-request-id', requestId);
+      if (upstreamName) res.setHeader('x-logger-upstream', upstreamName);
+    };
+
     /** 统一失败出口：落库 + 回写错误响应 */
     const fail = (status, message, { type = 'proxy_error', code = null, entry = baseEntry } = {}) => {
       let logId = null;
@@ -119,6 +132,7 @@ export function createProxyHandler({ store, config, bus }) {
         console.error('[proxy] 写入失败日志出错：', err.message);
       }
       if (logId) publish(logId);
+      markResponse();
       if (!res.headersSent && !res.writableEnded) {
         sendApiError(res, status, message, type, { code });
       } else if (!res.writableEnded) {
@@ -251,6 +265,7 @@ export function createProxyHandler({ store, config, bus }) {
       });
       publish(logId);
       console.warn(`[proxy] ${endpoint} → ${upstream.name} 失败：${message}`);
+      markResponse(upstream.name);
       if (!res.headersSent && !res.writableEnded) {
         sendApiError(res, timeout ? 504 : 502, message, 'upstream_error', {
           code: timeout ? 'upstream_timeout' : 'upstream_unreachable',
@@ -278,6 +293,7 @@ export function createProxyHandler({ store, config, bus }) {
           error: `读取上游响应失败：${message}`,
         });
         publish(logId);
+        markResponse(upstream.name);
         if (!res.headersSent && !res.writableEnded) sendApiError(res, 502, `读取上游响应失败：${message}`, 'upstream_error');
         return;
       }
