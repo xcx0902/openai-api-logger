@@ -571,6 +571,39 @@ async function main() {
     assert.ok(result.json.config.logging.maxBodyChars > 0);
   });
 
+  await step('config.json 只存服务自身配置，不含任何上游与密钥', async () => {
+    // 用户反馈过「config.json 里怎么没有上游」——这里把「上游存在库里、不落配置文件」
+    // 这个设计固化下来，防止以后有人顺手把上游也写进 config.json（那会把密钥散到两个地方）。
+    const configFile = path.join(DATA_DIR, 'config.json');
+    assert.ok(fs.existsSync(configFile), `配置文件不存在：${configFile}`);
+
+    const raw = fs.readFileSync(configFile, 'utf8');
+
+    // 1) 明文密钥绝不能出现在配置文件里
+    assert.ok(!raw.includes(MOCK_KEY), 'config.json 中出现了上游明文密钥');
+
+    // 2) 上游相关字段也不该出现
+    for (const forbidden of ['upstreams', 'base_url', 'api_key']) {
+      assert.ok(!raw.includes(forbidden), `config.json 中出现了上游字段 ${forbidden}`);
+    }
+
+    // 3) 顶层分组固定为四组
+    assert.deepEqual(Object.keys(JSON.parse(raw)).sort(), ['logging', 'proxy', 'server', 'ui']);
+
+    // 4) 设置接口返回的 config 里同样不该带 upstreams（上游走独立接口）
+    const settings = await api('/admin/api/settings');
+    assert.equal(settings.json.config.upstreams, undefined, 'settings.config 不应包含 upstreams');
+    assert.equal(settings.json.upstreams, undefined, '上游不该混在设置接口里返回');
+
+    // 5) 文件权限 0600（内含 adminToken / proxyToken）
+    assert.equal(fs.statSync(configFile).mode & 0o777, 0o600, 'config.json 权限应为 0600');
+
+    // 6) 上游确实在数据库里：删掉配置文件的副本也不影响（走独立接口仍然列出）
+    const list = await api('/admin/api/upstreams');
+    const names = list.json.items.map((u) => u.name);
+    assert.ok(names.includes('mock') && names.includes('alt'), `上游应存在数据库中，实际：${names}`);
+  });
+
   await step('设置代理令牌后 /v1 需要鉴权', async () => {
     await api('/admin/api/settings', { method: 'PUT', body: { server: { proxyToken: 'sk-proxy-token-xyz' } } });
     const denied = await proxy('/v1/chat/completions', { body: { model: 'mock-gpt-4o', messages: [{ role: 'user', content: 'blocked' }] } });

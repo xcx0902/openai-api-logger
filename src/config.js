@@ -1,6 +1,12 @@
 /**
  * 配置层：config.json 读写 + 环境变量覆盖 + 默认值。
- * 配置里可能包含上游 API Key，因此 data/ 目录已在 .gitignore 中排除。
+ *
+ * 这里只管「服务自身怎么跑」的四组设置：server / proxy / logging / ui。
+ * **上游端点不在此文件里**——它们存在 SQLite 的 upstreams 表中（见 src/db.js），
+ * 因为需要在运行时随时增删改查、条数不固定。环境变量 OAL_UPSTREAM_* 也只用于
+ * 「首次运行且无任何上游」时种一条记录进库，同样不写回 config.json。
+ *
+ * config.json 仍以 0600 权限落盘（含 adminToken / proxyToken），且整个 data/ 已被 gitignore。
  */
 import fs from 'node:fs';
 import path from 'node:path';

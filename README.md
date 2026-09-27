@@ -149,9 +149,9 @@ web/
   app.js           控制台前端（原生 ESM，无构建）：概览 / 对话 / 日志 / 上游 / 设置
   styles.css       样式（浅色主题）
 test/
-  smoke.mjs        端到端测试（43 项断言）
+  smoke.mjs        端到端测试（44 项断言）
 data/              运行时数据（已 gitignore，位置可被 OAL_DATA_DIR 覆盖）
-  config.json      配置（含上游密钥，0600 权限）
+  config.json      服务自身配置（监听/令牌/代理/日志/界面，不含上游）
   logs.db          SQLite 数据库（WAL 模式，另有 logs.db-wal / -shm）
 ```
 
@@ -170,6 +170,32 @@ data/              运行时数据（已 gitignore，位置可被 OAL_DATA_DIR �
 | 5 | 兜底 | 第一个启用的上游 | `first-enabled` |
 
 第 2、3 条可分别在「设置 → 代理行为」里关闭。
+
+### 上游配置存在哪里
+
+存在数据库的 `upstreams` 表里，**不在 `config.json` 中**。
+
+这是刻意的分工：`config.json` 装的是「服务自身怎么跑」（监听、令牌、超时、日志策略），
+启动时读一次；上游是**业务数据**——要在运行时随时增删改查、条数不固定、
+还要和界面状态保持一致，放配置文件就得反复重写整份文件，且无法并发安全地改。
+所以它和日志一起放在 SQLite（默认 `data/logs.db`，可用 `OAL_DB` 改）。
+
+想直接看，用管理接口最方便：
+
+```bash
+curl http://127.0.0.1:8787/admin/api/upstreams     # 列表（密钥默认只回掩码）
+```
+
+也可以设了 adminToken 后加 `-H 'x-admin-token: <token>'`。
+要查明文密钥，`curl -X POST .../admin/api/upstreams/1/reveal`，或直接查库：
+
+```bash
+sqlite3 data/logs.db 'select id,name,base_url,is_default,enabled from upstreams;'
+```
+
+> `OAL_UPSTREAM_URL` / `OAL_UPSTREAM_KEY` / `OAL_UPSTREAM_NAME` 这三个环境变量
+> **只在「首次运行且一个上游都没有」时**用来种入一条记录，它同样写进数据库，
+> **不会**被写进 `config.json`。
 
 ---
 
@@ -279,8 +305,14 @@ curl -N http://127.0.0.1:8787/v1/responses \
 
 ## 配置
 
-配置保存在 `data/config.json`（权限 `0600`，含上游密钥，已被 gitignore）。
+配置保存在 `data/config.json`（权限 `0600`，已被 gitignore）。
 也可以在控制台「设置」页里改；部分项支持环境变量覆盖。
+
+> **上游配置不在这个文件里。** `config.json` 只放「服务自身」的设置——
+> 监听地址与令牌、代理行为、日志策略、界面偏好，就是下面这段。
+> 上游端点（`base_url` / `api_key` / 启用状态等）存在**数据库**里的 `upstreams` 表，
+> 因为需要在运行时随时增删改查、条数也不固定。
+> 在控制台「上游」页管理即可；要用命令行看，见「常见问题 → 上游配置存哪儿了？」。
 
 ```jsonc
 {
@@ -364,7 +396,8 @@ curl -N http://127.0.0.1:8787/v1/responses \
   要看明文必须显式调用 reveal。
 - **CORS 默认关闭**：否则任意网页都能悄悄调用你的本地代理，直接烧掉你的 API 额度。
   只有需要浏览器前端直连时才在设置里打开。
-- **`data/` 不会进 git**：`config.json`（含密钥）与 `logs.db` 都在 `.gitignore` 里。
+- **`data/` 不会进 git**：`config.json`（含管理/代理令牌）与 `logs.db`
+  （含日志与上游密钥）都在 `.gitignore` 里。
 - **请求体本身不脱敏**：如果提示词里有敏感信息，请自行控制
   （关掉 `logBodies`、调小 `maxBodyChars`，或用 `retentionDays` 定期清理）。
 
@@ -377,9 +410,10 @@ npm test
 ```
 
 `test/smoke.mjs` 会自行拉起 mock 上游与代理（独立端口 + 临时数据目录），
-覆盖 43 项断言：两种格式 × 流式/非流式 × 工具调用的透传与落库、四种路由策略、
+覆盖 44 项断言：两种格式 × 流式/非流式 × 工具调用的透传与落库、四种路由策略、
 五类失败路径、日志筛选/检索/分页/排序/导出、按 request_id 反查、
-密钥脱敏、令牌鉴权、截断、级联删除，以及「上次被强杀遗留的进行中日志」的启动收尾。
+密钥脱敏、令牌鉴权、截断、级联删除、**config.json 不含上游与明文密钥**，
+以及「上次被强杀遗留的进行中日志」的启动收尾。
 
 ---
 
@@ -398,6 +432,11 @@ npm test
 没有。流式响应不缓冲、按块透传；唯一会改动的是**发往上游的请求体**（模型名前缀剥离、
 注入 include_usage，均可关闭）。响应侧只会补齐两个辅助响应头
 `x-logger-request-id`、`x-logger-upstream`。
+
+**`config.json` 里为什么没有上游配置？**
+因为上游存在**数据库**的 `upstreams` 表，不在配置文件里——详见「上游路由 → 上游配置存在哪里」。
+`config.json` 只有 `server` / `proxy` / `logging` / `ui` 四组，全部是「服务自身怎么跑」的设置。
+你打开文件看到的就是全部内容，没有隐藏字段，也没有被截断。
 
 **数据库文件到底在哪儿？**
 默认是 `<项目目录>/data/logs.db`（配置文件为 `data/config.json`）。三处都能改：
