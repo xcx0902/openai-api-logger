@@ -120,6 +120,14 @@ function bindAll(args) {
   return args.map(bind);
 }
 
+/** 列表 / 实时推送用的字段集（不含大字段，保证查询与推送轻量） */
+const SUMMARY_COLUMNS = `id, request_id, started_at, finished_at, duration_ms, first_token_ms, phase, endpoint,
+        method, status_code, ok, stream, model, upstream_id, upstream_name, route_reason, client_ip,
+        prompt_tokens, completion_tokens, total_tokens, tool_calls_count, finish_reason,
+        event_count, error, request_preview, response_preview,
+        length(coalesce(request_body, '')) AS request_body_len,
+        length(coalesce(response_body, '')) AS response_body_len`;
+
 export class Store {
   /**
    * @param {string} dbFile SQLite 文件路径，':' 内存模式用于测试
@@ -424,18 +432,19 @@ export class Store {
 
     const total = this.#s(`SELECT COUNT(*) AS n FROM logs ${clause}`).get(...bindAll(params)).n;
     const rows = this.#s(
-      `SELECT id, request_id, started_at, finished_at, duration_ms, first_token_ms, phase, endpoint, method,
-              status_code, ok, stream, model, upstream_id, upstream_name, route_reason, client_ip,
-              prompt_tokens, completion_tokens, total_tokens, tool_calls_count, finish_reason,
-              event_count, error, request_preview, response_preview,
-              length(coalesce(request_body,'')) AS request_body_len,
-              length(coalesce(response_body,'')) AS response_body_len
+      `SELECT ${SUMMARY_COLUMNS}
        FROM logs ${clause}
        ORDER BY ${sort} ${direction}, id DESC
        LIMIT ? OFFSET ?`,
     ).all(...bindAll([...params, limit, offset]));
 
     return { total, limit, offset, rows: rows.map(mapLogSummary) };
+  }
+
+  /** 单条日志的轻量摘要（用于实时推送，避免把 body 也推给前端） */
+  getLogSummary(id) {
+    const row = this.#s(`SELECT ${SUMMARY_COLUMNS} FROM logs WHERE id = ?`).get(bind(id));
+    return row ? mapLogSummary(row) : null;
   }
 
   getLog(id) {
