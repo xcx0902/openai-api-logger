@@ -264,9 +264,6 @@ function openModal({ title, body, footer, width }) {
     <div class="modal-body">${body}</div>
     <div class="modal-foot">${footer}</div>`;
   $('#modal-mask').hidden = false;
-  on($('#modal-mask'), 'click', (event) => {
-    if (event.target.id === 'modal-mask') closeModal();
-  });
 }
 
 function closeModal() {
@@ -1526,6 +1523,11 @@ document.addEventListener('change', (event) => {
 });
 
 $('#drawer-mask').addEventListener('click', closeDrawer);
+// 点击弹窗外侧关闭。只在启动时绑定一次（原先写在 openModal 里，每次打开都会
+// 叠加一个监听器，开着开着就会有 N 个重复回调）。
+$('#modal-mask').addEventListener('click', (event) => {
+  if (event.target.id === 'modal-mask') closeModal();
+});
 
 document.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape') return;

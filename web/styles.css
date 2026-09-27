@@ -37,6 +37,18 @@
   box-sizing: border-box;
 }
 
+/* hidden 属性必须始终生效。
+   UA 样式里的 [hidden]{display:none} 优先级极低（选择器权重 0,1,0 且属于 UA
+   origin），任何 author 样式里的一条 `display:flex` 都能把它盖掉——浏览器不会
+   因为元素带 hidden 就自动隐藏它。本项目里 .drawer 与 .modal-mask 都需要
+   display:flex 做布局，于是这两个浮层即使带着 hidden 也照样渲染：
+   #modal-mask（fixed + inset:0 + z-index:50）会铺满视口吃掉所有点击，界面
+   看起来「完全点不动」；#drawer（fixed + 右侧 920px）会显示成一块空白灰板。
+   所以这里用 !important 兜底，保证 [hidden] 永远是 display:none。 */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   margin: 0;
