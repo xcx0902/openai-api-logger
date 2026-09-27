@@ -51,7 +51,7 @@ export function createAdminHandler({ store, config, bus, version = '0.1.0' }) {
       res.end();
       return true;
     }
-    if (!checkAuth(req, res, config)) return true;
+    if (!checkAuth(req, res, config, { allowQueryToken: pathname === '/admin/api/events' })) return true;
 
     for (const [method, pattern, handler] of routes) {
       const match = pattern.exec(pathname);
@@ -82,12 +82,20 @@ export function createAdminHandler({ store, config, bus, version = '0.1.0' }) {
  * 鉴权
  * ------------------------------------------------------------------ */
 
-function checkAuth(req, res, config) {
+/**
+ * 鉴权。allowQueryToken 仅对 SSE 实时日志接口开启——浏览器的 EventSource
+ * 无法自定义请求头，只能把令牌放到查询串里。
+ */
+function checkAuth(req, res, config, { allowQueryToken = false } = {}) {
   const token = String(config.server.adminToken || '');
   if (!token) return true;
   const header = String(req.headers.authorization || '');
   const bearer = /^bearer\s+(.+)$/i.exec(header.trim());
-  const provided = (bearer ? bearer[1].trim() : '') || String(req.headers['x-admin-token'] || '').trim();
+  let provided = (bearer ? bearer[1].trim() : '') || String(req.headers['x-admin-token'] || '').trim();
+  if (!provided && allowQueryToken) {
+    const query = new URL(req.url, 'http://localhost').searchParams.get('token');
+    provided = query ? query.trim() : '';
+  }
   if (provided && provided === token) return true;
   sendApiError(res, 401, '需要管理令牌：请携带 Authorization: Bearer <adminToken> 或 x-admin-token。', 'invalid_request_error', {
     code: 'admin_token_required',
