@@ -1,0 +1,26 @@
+{
+  "name": "openai-api-logger",
+  "version": "0.1.0",
+  "private": true,
+  "description": "本地 OpenAI 兼容代理 + 日志系统：可配置多个上游端点，转发 /v1/chat/completions 与 /v1/responses 请求，并把完整请求/响应（含流式分片）落库到 SQLite，附带内置 Web 控制台。",
+  "type": "module",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning src/server.js",
+    "dev": "node --disable-warning=ExperimentalWarning --watch src/server.js",
+    "mock": "node --disable-warning=ExperimentalWarning src/mock-upstream.js",
+    "test": "node --disable-warning=ExperimentalWarning test/smoke.mjs"
+  },
+  "keywords": [
+    "openai",
+    "proxy",
+    "logging",
+    "sqlite",
+    "chat-completions",
+    "responses-api"
+  ],
+  "license": "MIT"
+}
