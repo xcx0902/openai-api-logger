@@ -19,3 +19,6 @@ data/*
 *.log
 tmp/
 coverage/
+
+# 本地助手工作区（会话记忆等，不属于项目产物）
+.workbuddy/
