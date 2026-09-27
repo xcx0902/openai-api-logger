@@ -586,6 +586,21 @@ export class Store {
     };
   }
 
+  /**
+   * 进程在请求进行中被杀掉（强杀 / 断电）会留下 phase='running' 的日志，
+   * 它们在界面上会永远显示「进行中」。启动时统一收尾。
+   */
+  markStaleRunning(reason = '进程在请求进行中退出，该次请求结果未知') {
+    const result = this.#s(
+      `UPDATE logs
+         SET phase = 'error', ok = 0,
+             error = coalesce(error, ?),
+             finished_at = coalesce(finished_at, ?)
+       WHERE phase = 'running'`,
+    ).run(...bindAll([reason, nowIso()]));
+    return Number(result.changes);
+  }
+
   /** 供筛选下拉框使用的去重值 */
   facets() {
     return {

@@ -130,6 +130,10 @@ function main() {
     if (purged) console.log(`[init] 已按保留策略（${retentionDays} 天）清理 ${purged} 条历史日志`);
   }
 
+  // 上次被强杀时可能留下「进行中」的日志，收尾掉以免界面上永久显示进行中
+  const stale = store.markStaleRunning();
+  if (stale) console.log(`[init] 已将 ${stale} 条上次未收尾的日志标记为中断`);
+
   const proxy = createProxyHandler({ store, config, bus });
   const admin = createAdminHandler({ store, config, bus, version: VERSION });
 

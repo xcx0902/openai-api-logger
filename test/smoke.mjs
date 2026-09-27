@@ -643,6 +643,29 @@ async function main() {
     assert.equal(result.json.error.type, 'not_found');
   });
 
+  await step('启动时收尾上次强杀遗留的「进行中」日志', async () => {
+    // 直接往库里塞一条 running 日志，模拟「上次进程被强杀」
+    const { DatabaseSync } = await import('node:sqlite');
+    const db = new DatabaseSync(path.join(DATA_DIR, 'logs.db'));
+    db.prepare(
+      `INSERT INTO logs (request_id, started_at, phase, endpoint, method, path)
+       VALUES (?, ?, 'running', 'chat.completions', 'POST', '/v1/chat/completions')`,
+    ).run('stale-running-fixture', new Date().toISOString());
+    db.close();
+
+    // 再起一个实例指向同一个数据目录，启动流程应当把这条日志收尾
+    start(['src/server.js'], { OAL_DATA_DIR: DATA_DIR, OAL_PORT: String(PROXY_PORT + 1) });
+    await waitForPort(`http://127.0.0.1:${PROXY_PORT + 1}/health`);
+
+    const list = await api('/admin/api/logs?limit=200');
+    const stale = list.json.rows.find((r) => r.request_id === 'stale-running-fixture');
+    assert.ok(stale, '未找到测试用的遗留日志');
+    assert.equal(stale.phase, 'error');
+    assert.equal(stale.ok, false);
+    assert.ok(stale.error.includes('进程在请求进行中退出'), `错误信息异常：${stale.error}`);
+    assert.ok(stale.finished_at, '应当补上结束时间');
+  });
+
   /* ── 汇总 ────────────────────────────────────────────────────────── */
   console.log(`\n${'─'.repeat(60)}`);
   console.log(`通过 ${passed} 项，失败 ${failed} 项`);
