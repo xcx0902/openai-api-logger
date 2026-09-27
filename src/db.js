@@ -764,6 +764,7 @@ function mapLogDetail(row) {
   return {
     ...summary,
     query: row.query,
+    path: row.path,
     requested_model: row.requested_model,
     upstream_url: row.upstream_url,
     user_agent: row.user_agent,
