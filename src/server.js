@@ -188,6 +188,7 @@ function main() {
     console.log(`  openai-api-logger v${VERSION} 已启动`);
     console.log(`  ├─ 控制台     ${base}/`);
     console.log(`  ├─ 代理地址   ${base}/v1`);
+    console.log(`  ├─ 数据目录   ${paths.dataDir}`);
     console.log(`  ├─ 上游数量   ${upstreams.length}${upstreams.length === 0 ? '（请先在控制台添加上游）' : ''}`);
     console.log(`  ├─ 管理鉴权   ${config.server.adminToken ? '已开启（adminToken）' : '未开启（仅本机可访问时建议保持关闭）'}`);
     console.log(`  └─ 代理鉴权   ${config.server.proxyToken ? '已开启（proxyToken）' : '未开启'}`);

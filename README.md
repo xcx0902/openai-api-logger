@@ -150,7 +150,9 @@ web/
   styles.css       样式（浅色主题）
 test/
   smoke.mjs        端到端测试（43 项断言）
-data/              运行时数据（已 gitignore）：config.json、logs.db
+data/              运行时数据（已 gitignore，位置可被 OAL_DATA_DIR 覆盖）
+  config.json      配置（含上游密钥，0600 权限）
+  logs.db          SQLite 数据库（WAL 模式，另有 logs.db-wal / -shm）
 ```
 
 ---
@@ -396,6 +398,25 @@ npm test
 没有。流式响应不缓冲、按块透传；唯一会改动的是**发往上游的请求体**（模型名前缀剥离、
 注入 include_usage，均可关闭）。响应侧只会补齐两个辅助响应头
 `x-logger-request-id`、`x-logger-upstream`。
+
+**数据库文件到底在哪儿？**
+默认是 `<项目目录>/data/logs.db`（配置文件为 `data/config.json`）。三处都能改：
+`OAL_DATA_DIR` / `OAL_DB` 环境变量、`npm start -- --data-dir <路径>`，
+或启动时用 `OAL_DATA_DIR` 指向别处。**当前实际用的路径**可以直接看：
+控制台「概览」页的「数据库」卡片（路径写在卡片说明里），
+以及「设置」页底部的「数据目录 / 数据库 / 配置」三行。
+
+如果你在项目 `data/` 下只看到 `.gitkeep`，说明启动时设了 `OAL_DATA_DIR`
+指向了别处（常见于把演示实例 / 测试实例跑到临时目录），
+`curl http://127.0.0.1:8787/admin/api/settings` 返回的 `paths` 字段是最权威的答案。
+
+**`logs.db` 只有几 KB，旁边却有个几百 MB 的 `logs.db-wal`？**
+正常，那是 SQLite 的 WAL（预写日志）。写入先进 `-wal`，攒够量或进程正常退出时
+才合并回主库，所以主库文件小 ≠ 没数据。两点推论：
+- 备份或搬移数据**必须把 `logs.db`、`logs.db-wal`、`logs.db-shm` 三个一起拷**，
+  只拷主库会丢掉还没合并的日志；或者先在「设置 → 维护」点「整理数据库」（VACUUM）
+  并停掉进程再拷。
+- `data/*` 已在 `.gitignore` 里忽略，日志和上游密钥都不会进 git。
 
 **数据库很大怎么办？**
 控制台「设置 → 日志记录」可以打开 `retentionDays`（启动与每小时自动清理），
